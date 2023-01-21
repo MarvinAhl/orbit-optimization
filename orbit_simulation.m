@@ -12,7 +12,8 @@ steps = 1000;  % Only for displaying the earth
 t = t0:(tf-t0)/steps:tf;
 earth_pos_arr = earth_pos(t, const);
 
-r0 = [const.earth_sem_maj_ax; -700000; 0; 2000; 9285; 0];
+%r0 = [0; -const.earth_sem_maj_ax*0.8; 0; 10000; 0; 0];
+r0 = [const.earth_sem_maj_ax*0.95; 0; 0; 0; 9500; 0];
 
 [t_ode, vehicle_r_t] = ode89(@(t, r) force(t, r, const), [t0, tf], r0);
 vehicle_r = vehicle_r_t';
