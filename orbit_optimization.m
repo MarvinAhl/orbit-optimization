@@ -12,7 +12,8 @@ t_act = 100;  % Min time between maneuvres in s
 % Set initial conditions:
 %r0 = [const.earth_sem_maj_ax; -700000; 0; 2000; 9285; 0];
 r0 = [const.earth_sem_maj_ax*0.95; 0; 0; 0; 9500; 0];
-target_r0 = [0; -const.earth_sem_maj_ax*0.8; 0; 10000; 0; 0];
+%target_r0 = [0; -const.earth_sem_maj_ax*0.8; 0; 10000; 0; 0];
+target_r0 = [const.earth_sem_maj_ax*0.8/sqrt(2); -const.earth_sem_maj_ax*0.8/sqrt(2); 0; 10000/sqrt(2); 10000/sqrt(2); 0];
 
 % Solve target path
 target_trajectory = simulate_target(t0, tmax, target_r0, const);
@@ -30,7 +31,7 @@ sim_rs = fcn2optimexpr(@simulate, ts, rs, t0, r0, const, 'OutputSize', [6, phase
 
 % Use this code instead of the line above if you want to split up the simulate function instead of having it vectorized
 % sim_rs = optimexpr(6, phases);
-% for i = 1:phases
+% for i = 1 : phases
 %     sim_rs(:, i) = fcn2optimexpr(@simulate_single, i, ts, rs, t0, r0, const, 'OutputSize', [6, 1], 'ReuseEvaluation', true, 'Analysis', 'off');
 % end
 
@@ -58,19 +59,28 @@ rf_constr = sqrt(sum((target_rf(1:3) - sim_rs(1:3, end)).^2)) == 0;
 problem.Constraints.rf_constr = rf_constr;
 
 % Initial values: Solve trajectory with initial conditions and use intermediate points
+t_guess = (t0+(tmax-t0)/phases : (tmax-t0)/phases : tmax)';
+t_guess(1) = 200;  % Time isn't altered by the solver very much so I have to set the first time to something reasonable manually
+
+% r Guess 1
 r_guess_traj = ode89(@(t, r) force(t, r, const), [t0, tmax], r0);
-t_guess = t0+(tmax-t0)/phases : (tmax-t0)/phases : tmax;
 r_guess = deval(t_guess(1:end-1), r_guess_traj);
+
+% r Guess 2
+% rf = target(tmax, target_trajectory, t0, tmax);
+% r_guess = initial_r(r0, rf, phases);
 
 x0.rs = r_guess;
 x0.ts = t_guess;
 
-prob_options = optimoptions(problem, 'UseParallel', true, 'Display', 'iter', 'MaxFunctionEvaluations', 30000);
+prob_options = optimoptions(problem, 'UseParallel', true, 'Display', 'iter', 'MaxFunctionEvaluations', 3000);
 
 %show(problem)
 tic
 [sol, fval, eflag, output] = solve(problem, x0, 'Options', prob_options);
 toc
+
+disp(num2str(sol.ts - t_guess));
 
 % ~~~ Plot ~~~
 plot3(0, 0, 0, 'r*');  % Sun
@@ -90,11 +100,11 @@ earth_pos_arr = earth_pos(t, const);
 plot3(earth_pos_arr(1, :), earth_pos_arr(2, :), earth_pos_arr(3, :), 'b--');  % Earth
 
 % Vehicle Plot
-[eval_ts, eval_rs, burn_points] = evaluate(sol.ts, sol.rs, t0, r0, target(tf, target_trajectory, t0, tmax), const);
+[~, eval_rs, burn_points] = evaluate(sol.ts, sol.rs, t0, r0, target(tf, target_trajectory, t0, tmax), const);
 plot3(eval_rs(1, :), eval_rs(2, :), eval_rs(3, :), 'k-');
 plot3(burn_points(1, :), burn_points(2, :), burn_points(3, :), 'r.');
 
-% Todo: Target Plot
+% Target Plot
 %idx = find(target_trajectory.x <= tmax);
 %plot3(target_trajectory.y(1, 1:idx(end)), target_trajectory.y(2, 1:idx(end)), target_trajectory.y(3, 1:idx(end)), 'g-');
 target_traj = target(t, target_trajectory, t0, tmax);
@@ -108,6 +118,28 @@ function position = earth_pos(t, const)
     angles = 2*pi/const.earth_period * t;
     position(1, :) = const.earth_sem_maj_ax .* cos(angles);
     position(2, :) = const.earth_sem_maj_ax .* sin(angles);
+end
+
+function r_init = initial_r(r0, rf, phases)
+    r_init = zeros(6, phases-1);
+
+    % Get position as equally spaced spiral points around the sun towards target
+    [r0_az, r0_el, r0_r] = cart2sph(r0(1), r0(2), r0(3));
+    [rf_az, rf_el, rf_r] = cart2sph(rf(1), rf(2), rf(3));
+    if rf_az <= r0_az
+        rf_az = rf_az + 2*pi;
+    end
+    azs = linspace(r0_az, rf_az, phases+1);
+    els = linspace(r0_el, rf_el, phases+1);
+    rs = linspace(r0_r, rf_r, phases+1);
+    [xs, ys, zs] = sph2cart(azs(2:end-1), els(2:end-1), rs(2:end-1));
+    r_init(1:3, :) = [xs; ys; zs];
+
+    % Velocity will just point from one point to the next
+    v0 = norm(r0(4:6));
+    comb_rs = [r_init(1:3, :), rf(1:3)];
+    pointing = comb_rs(:, 2:end) - comb_rs(:, 1:end-1);
+    r_init(4:6, :) = pointing ./ vecnorm(pointing) * v0;
 end
 
 function dr = force(t, r, const)  % dr/dt = force(r), r = [x; y; z; vx; vy; vz]
@@ -127,7 +159,7 @@ function sim_rs = simulate(ts, rs, t0, r0, const)
     end_ts = ts;
     init_rs = [r0, rs];
     sim_rs = zeros(6, phases);
-    parfor i = 1 : phases
+    parfor i = 1 : phases  % for instead of parfor may be faster depending on the circumstances
         try
             traj = ode89(@(t, r) force(t, r, const), [start_ts(i), end_ts(i)], init_rs(:, i));
             sim_rs(:, i) = deval(end_ts(i), traj);
